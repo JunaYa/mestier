@@ -9,6 +9,7 @@ export type ModuleId =
 	| 'planning'
 	| 'planification'
 	| 'chat'
+	| 'automatisation'
 	| 'settings'
 
 /**
@@ -66,4 +67,5 @@ export interface AppModule {
 	 * modules. Defaults to `primary`.
 	 */
 	railPlacement?: 'primary' | 'utility'
+	requiredPermission?: PermissionName
 }
