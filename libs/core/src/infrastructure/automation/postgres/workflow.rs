@@ -1,11 +1,12 @@
 use common::{CoreError, OrganizationId};
 use mestier_macros::repository;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
     domain::automation::{
         ports::WorkflowRepository,
-        workflow::{Graph, Workflow, WorkflowReference, WorkflowVersion},
+        workflow::{Graph, Workflow, WorkflowLayout, WorkflowReference, WorkflowVersion},
     },
     infrastructure::postgres::{SharedTx, error::map_sqlx_error},
 };
@@ -28,22 +29,38 @@ struct WorkflowRow {
     description: Option<String>,
     enabled: bool,
     current_version_id: Option<Uuid>,
+    layout: Option<serde_json::Value>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-impl From<WorkflowRow> for Workflow {
-    fn from(row: WorkflowRow) -> Self {
-        Self {
+impl TryFrom<WorkflowRow> for Workflow {
+    type Error = CoreError;
+
+    fn try_from(row: WorkflowRow) -> Result<Self, Self::Error> {
+        let layout = row.layout.and_then(|stored| {
+            serde_json::from_value::<WorkflowLayout>(stored)
+                .inspect_err(|error| {
+                    warn!(
+                        workflow_id = %row.id,
+                        %error,
+                        "discarding a workflow layout this build cannot read"
+                    );
+                })
+                .ok()
+        });
+
+        Ok(Self {
             id: row.id,
             org_id: OrganizationId(row.org_id),
             name: row.name,
             description: row.description,
             enabled: row.enabled,
             current_version_id: row.current_version_id,
+            layout,
             created_at: row.created_at,
             updated_at: row.updated_at,
-        }
+        })
     }
 }
 
@@ -82,7 +99,7 @@ impl<'tx> WorkflowRepository for PgWorkflowRepository<'tx> {
             r#"INSERT INTO automation.workflow
                    (id, org_id, name, description, enabled, current_version_id, created_at, updated_at)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-               RETURNING id, org_id, name, description, enabled, current_version_id, created_at, updated_at"#,
+               RETURNING id, org_id, name, description, enabled, current_version_id, layout, created_at, updated_at"#,
             workflow.id,
             workflow.org_id.0,
             workflow.name,
@@ -96,7 +113,7 @@ impl<'tx> WorkflowRepository for PgWorkflowRepository<'tx> {
         .await
         .map_err(map_sqlx_error)?;
 
-        Ok(row.into())
+        row.try_into()
     }
 
     async fn find_by_id(
@@ -107,7 +124,7 @@ impl<'tx> WorkflowRepository for PgWorkflowRepository<'tx> {
         let mut tx = self.tx.lock().await;
         let row = sqlx::query_as!(
             WorkflowRow,
-            r#"SELECT id, org_id, name, description, enabled, current_version_id, created_at, updated_at
+            r#"SELECT id, org_id, name, description, enabled, current_version_id, layout, created_at, updated_at
                FROM automation.workflow WHERE org_id = $1 AND id = $2"#,
             org_id.0,
             id,
@@ -116,7 +133,7 @@ impl<'tx> WorkflowRepository for PgWorkflowRepository<'tx> {
         .await
         .map_err(map_sqlx_error)?;
 
-        Ok(row.map(Workflow::from))
+        row.map(Workflow::try_from).transpose()
     }
 
     async fn list_by_organization(
@@ -126,7 +143,7 @@ impl<'tx> WorkflowRepository for PgWorkflowRepository<'tx> {
         let mut tx = self.tx.lock().await;
         let rows = sqlx::query_as!(
             WorkflowRow,
-            r#"SELECT id, org_id, name, description, enabled, current_version_id, created_at, updated_at
+            r#"SELECT id, org_id, name, description, enabled, current_version_id, layout, created_at, updated_at
                FROM automation.workflow
                WHERE org_id = $1
                ORDER BY name"#,
@@ -136,7 +153,7 @@ impl<'tx> WorkflowRepository for PgWorkflowRepository<'tx> {
         .await
         .map_err(map_sqlx_error)?;
 
-        Ok(rows.into_iter().map(Workflow::from).collect())
+        rows.into_iter().map(Workflow::try_from).collect()
     }
 
     async fn update(
@@ -150,7 +167,7 @@ impl<'tx> WorkflowRepository for PgWorkflowRepository<'tx> {
             r#"UPDATE automation.workflow
                SET name = $3, description = $4, enabled = $5, updated_at = $6
                WHERE org_id = $1 AND id = $2
-               RETURNING id, org_id, name, description, enabled, current_version_id, created_at, updated_at"#,
+               RETURNING id, org_id, name, description, enabled, current_version_id, layout, created_at, updated_at"#,
             org_id.0,
             workflow.id,
             workflow.name,
@@ -162,7 +179,9 @@ impl<'tx> WorkflowRepository for PgWorkflowRepository<'tx> {
         .await
         .map_err(map_sqlx_error)?;
 
-        row.map(Workflow::from).ok_or(CoreError::NotFound)
+        row.map(Workflow::try_from)
+            .transpose()?
+            .ok_or(CoreError::NotFound)
     }
 
     async fn delete(&mut self, org_id: OrganizationId, id: Uuid) -> Result<(), CoreError> {
@@ -259,6 +278,35 @@ impl<'tx> WorkflowRepository for PgWorkflowRepository<'tx> {
         row.try_into()
     }
 
+    #[allow(clippy::needless_lifetimes)]
+    async fn set_layout<'a>(
+        &mut self,
+        org_id: OrganizationId,
+        workflow_id: Uuid,
+        layout: Option<&'a WorkflowLayout>,
+    ) -> Result<(), CoreError> {
+        let mut tx = self.tx.lock().await;
+        let layout_json = layout.map(serde_json::to_value).transpose().map_err(|e| {
+            CoreError::Internal(format!("workflow layout cannot be serialized: {e}"))
+        })?;
+
+        let outcome = sqlx::query!(
+            "UPDATE automation.workflow SET layout = $3 WHERE org_id = $1 AND id = $2",
+            org_id.0,
+            workflow_id,
+            layout_json,
+        )
+        .execute(&mut ***tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        if outcome.rows_affected() == 0 {
+            return Err(CoreError::NotFound);
+        }
+
+        Ok(())
+    }
+
     async fn find_version(
         &mut self,
         org_id: OrganizationId,
@@ -275,6 +323,28 @@ impl<'tx> WorkflowRepository for PgWorkflowRepository<'tx> {
             org_id.0,
             workflow_id,
             version,
+        )
+        .fetch_optional(&mut ***tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        row.map(WorkflowVersion::try_from).transpose()
+    }
+
+    async fn find_version_by_id(
+        &mut self,
+        org_id: OrganizationId,
+        workflow_version_id: Uuid,
+    ) -> Result<Option<WorkflowVersion>, CoreError> {
+        let mut tx = self.tx.lock().await;
+        let row = sqlx::query_as!(
+            WorkflowVersionRow,
+            r#"SELECT wv.id, wv.workflow_id, wv.version, wv.graph, wv.created_at, wv.created_by
+               FROM automation.workflow_version wv
+               JOIN automation.workflow w ON w.id = wv.workflow_id
+               WHERE w.org_id = $1 AND wv.id = $2"#,
+            org_id.0,
+            workflow_version_id,
         )
         .fetch_optional(&mut ***tx)
         .await
@@ -342,7 +412,9 @@ mod tests {
     use super::*;
     use crate::application::test_support::automation_pool;
     use crate::application::test_support::now_storable;
-    use crate::domain::automation::workflow::{Branch, Edge, PlacedConnector};
+    use crate::domain::automation::workflow::{
+        Branch, Edge, NodePosition, PlacedConnector, WorkflowLayout,
+    };
     use crate::infrastructure::postgres::with_tx;
 
     async fn make_pool() -> PgPool {
@@ -406,6 +478,7 @@ mod tests {
             description: None,
             enabled: true,
             current_version_id: None,
+            layout: None,
             created_at: now,
             updated_at: now,
         }
@@ -856,5 +929,201 @@ mod tests {
         .unwrap();
 
         assert_eq!(version.graph, graph);
+    }
+
+    fn layout_with(entries: &[(&str, f64, f64)]) -> WorkflowLayout {
+        entries
+            .iter()
+            .map(|(id, x, y)| ((*id).to_string(), NodePosition { x: *x, y: *y }))
+            .collect::<std::collections::BTreeMap<_, _>>()
+            .into()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live postgres"]
+    async fn setting_a_layout_is_read_back_on_the_workflow() {
+        let pool = make_pool().await;
+        let org_id = seed_organization(&pool, "set-layout").await;
+        let inserted = with_tx(&pool, async |tx| {
+            let mut repo = PgWorkflowRepository::new(&tx);
+            repo.insert(&workflow(org_id, "Laid out")).await
+        })
+        .await
+        .unwrap();
+        let layout = layout_with(&[("c1", 10.5, -20.0)]);
+
+        with_tx(&pool, async |tx| {
+            let mut repo = PgWorkflowRepository::new(&tx);
+            repo.set_layout(org_id, inserted.id, Some(&layout)).await
+        })
+        .await
+        .unwrap();
+
+        let found = with_tx(&pool, async |tx| {
+            let mut repo = PgWorkflowRepository::new(&tx);
+            repo.find_by_id(org_id, inserted.id).await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(found.layout, Some(layout));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live postgres"]
+    async fn a_layout_the_current_type_cannot_read_leaves_the_workflow_readable() {
+        let pool = make_pool().await;
+        let org_id = seed_organization(&pool, "unreadable-layout").await;
+        let inserted = with_tx(&pool, async |tx| {
+            let mut repo = PgWorkflowRepository::new(&tx);
+            repo.insert(&workflow(org_id, "Garbled")).await
+        })
+        .await
+        .unwrap();
+
+        sqlx::query("UPDATE automation.workflow SET layout = '{\"c1\": \"not a point\"}'::jsonb WHERE id = $1")
+            .bind(inserted.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let found = with_tx(&pool, async |tx| {
+            let mut repo = PgWorkflowRepository::new(&tx);
+            repo.find_by_id(org_id, inserted.id).await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(found.layout, None);
+        assert_eq!(found.name, "Garbled");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live postgres"]
+    async fn clearing_a_layout_with_none_removes_it() {
+        let pool = make_pool().await;
+        let org_id = seed_organization(&pool, "clear-layout").await;
+        let inserted = with_tx(&pool, async |tx| {
+            let mut repo = PgWorkflowRepository::new(&tx);
+            repo.insert(&workflow(org_id, "Cleared")).await
+        })
+        .await
+        .unwrap();
+        let layout = layout_with(&[("c1", 1.0, 2.0)]);
+        with_tx(&pool, async |tx| {
+            let mut repo = PgWorkflowRepository::new(&tx);
+            repo.set_layout(org_id, inserted.id, Some(&layout)).await
+        })
+        .await
+        .unwrap();
+
+        with_tx(&pool, async |tx| {
+            let mut repo = PgWorkflowRepository::new(&tx);
+            repo.set_layout(org_id, inserted.id, None).await
+        })
+        .await
+        .unwrap();
+
+        let found = with_tx(&pool, async |tx| {
+            let mut repo = PgWorkflowRepository::new(&tx);
+            repo.find_by_id(org_id, inserted.id).await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(found.layout, None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live postgres"]
+    async fn setting_a_layout_on_a_workflow_from_another_organization_is_not_found() {
+        let pool = make_pool().await;
+        let org_id = seed_organization(&pool, "layout-owner").await;
+        let stranger_org = seed_organization(&pool, "layout-stranger").await;
+        let inserted = with_tx(&pool, async |tx| {
+            let mut repo = PgWorkflowRepository::new(&tx);
+            repo.insert(&workflow(org_id, "Mine")).await
+        })
+        .await
+        .unwrap();
+        let layout = layout_with(&[("c1", 1.0, 2.0)]);
+
+        let outcome = with_tx(&pool, async |tx| {
+            let mut repo = PgWorkflowRepository::new(&tx);
+            repo.set_layout(stranger_org, inserted.id, Some(&layout))
+                .await
+        })
+        .await;
+
+        assert!(matches!(outcome, Err(CoreError::NotFound)));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live postgres"]
+    async fn finding_a_version_by_id_in_its_own_organization_returns_it() {
+        let pool = make_pool().await;
+        let org_id = seed_organization(&pool, "version-by-id").await;
+        let inserted = with_tx(&pool, async |tx| {
+            let mut repo = PgWorkflowRepository::new(&tx);
+            let workflow = repo.insert(&workflow(org_id, "Versioned")).await?;
+            repo.insert_version(org_id, workflow.id, &graph_with_credential(None), None)
+                .await
+        })
+        .await
+        .unwrap();
+
+        let found = with_tx(&pool, async |tx| {
+            let mut repo = PgWorkflowRepository::new(&tx);
+            repo.find_version_by_id(org_id, inserted.id).await
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(found, Some(inserted));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live postgres"]
+    async fn finding_a_version_by_id_from_another_organization_is_not_found() {
+        let pool = make_pool().await;
+        let org_id = seed_organization(&pool, "version-by-id-owner").await;
+        let stranger_org = seed_organization(&pool, "version-by-id-stranger").await;
+        let inserted = with_tx(&pool, async |tx| {
+            let mut repo = PgWorkflowRepository::new(&tx);
+            let workflow = repo.insert(&workflow(org_id, "Mine")).await?;
+            repo.insert_version(org_id, workflow.id, &graph_with_credential(None), None)
+                .await
+        })
+        .await
+        .unwrap();
+
+        let found = with_tx(&pool, async |tx| {
+            let mut repo = PgWorkflowRepository::new(&tx);
+            repo.find_version_by_id(stranger_org, inserted.id).await
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            found, None,
+            "a version id from another organization must read back as absent"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live postgres"]
+    async fn finding_a_version_by_an_id_that_does_not_exist_returns_none() {
+        let pool = make_pool().await;
+        let org_id = seed_organization(&pool, "version-by-id-missing").await;
+
+        let found = with_tx(&pool, async |tx| {
+            let mut repo = PgWorkflowRepository::new(&tx);
+            repo.find_version_by_id(org_id, generate_uuid_v7()).await
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(found, None);
     }
 }

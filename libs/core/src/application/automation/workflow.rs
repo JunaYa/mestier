@@ -43,6 +43,7 @@ impl MestierUseCase {
             description: command.description,
             enabled: true,
             current_version_id: None,
+            layout: None,
             created_at: now,
             updated_at: now,
         };
@@ -124,14 +125,22 @@ impl MestierUseCase {
         validate_graph(&command.graph, &catalogue, &organization_credentials)
             .map_err(|errors| CoreError::Conflict(format_graph_errors(&errors)))?;
 
-        workflows
+        let version = workflows
             .insert_version(
                 command.org_id,
                 command.workflow_id,
                 &command.graph,
                 command.created_by,
             )
-            .await
+            .await?;
+
+        if let Some(layout) = command.layout.as_ref() {
+            workflows
+                .set_layout(command.org_id, command.workflow_id, Some(layout))
+                .await?;
+        }
+
+        Ok(version)
     }
 
     #[transactional(workflow)]
@@ -143,6 +152,18 @@ impl MestierUseCase {
     ) -> Result<Option<WorkflowVersion>, CoreError> {
         let mut repository = workflow_repository;
         repository.find_version(org_id, workflow_id, version).await
+    }
+
+    #[transactional(workflow)]
+    pub async fn find_workflow_version_by_id(
+        &self,
+        org_id: OrganizationId,
+        workflow_version_id: Uuid,
+    ) -> Result<Option<WorkflowVersion>, CoreError> {
+        let mut repository = workflow_repository;
+        repository
+            .find_version_by_id(org_id, workflow_version_id)
+            .await
     }
 
     #[transactional(workflow)]
@@ -424,6 +445,7 @@ mod tests {
                 org_id,
                 workflow_id: created.id,
                 graph: valid_graph(),
+                layout: None,
                 created_by: None,
             })
             .await
@@ -463,6 +485,7 @@ mod tests {
                 org_id,
                 workflow_id: created.id,
                 graph: valid_graph(),
+                layout: None,
                 created_by: None,
             })
             .await
@@ -477,6 +500,7 @@ mod tests {
                 org_id,
                 workflow_id: created.id,
                 graph: second_graph,
+                layout: None,
                 created_by: None,
             })
             .await
@@ -510,6 +534,7 @@ mod tests {
                 org_id,
                 workflow_id: generate_uuid_v7(),
                 graph: valid_graph(),
+                layout: None,
                 created_by: None,
             })
             .await
@@ -550,6 +575,7 @@ mod tests {
                 org_id,
                 workflow_id: created.id,
                 graph: invalid_graph,
+                layout: None,
                 created_by: None,
             })
             .await
@@ -619,6 +645,7 @@ mod tests {
                 org_id,
                 workflow_id: created.id,
                 graph,
+                layout: None,
                 created_by: None,
             })
             .await
