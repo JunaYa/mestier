@@ -67,6 +67,9 @@ impl Permissions {
     // other VIEW_*/MANAGE_* splits above.
     pub const VIEW_QUOTES: Self = Permissions(1 << 18); // 262144
 
+    pub const VIEW_AUTOMATION: Self = Permissions(1 << 19); // 524288
+    pub const MANAGE_AUTOMATION: Self = Permissions(1 << 20); // 1048576
+
     pub const ALL: Self = Permissions(i64::MAX);
 
     pub const fn contains(self, other: Permissions) -> bool {
@@ -105,6 +108,8 @@ impl Permissions {
         ("VIEW_INVOICES", Permissions::VIEW_INVOICES),
         ("MANAGE_INVOICES", Permissions::MANAGE_INVOICES),
         ("VIEW_QUOTES", Permissions::VIEW_QUOTES),
+        ("VIEW_AUTOMATION", Permissions::VIEW_AUTOMATION),
+        ("MANAGE_AUTOMATION", Permissions::MANAGE_AUTOMATION),
     ];
 
     /// The names of every bit `self` carries — #307's "the caller's
@@ -200,6 +205,7 @@ pub const MEMBER_ROLE_NAME: &str = "member";
 ///
 /// #396 adds `VIEW_QUOTES`: admin already manages quotes via
 /// `MANAGE_QUOTES`, so the read bit merely names a capability it already had.
+///
 pub fn default_admin_business_permissions() -> Permissions {
     Permissions::VIEW_PLANNING
         | Permissions::MANAGE_PLANNING
@@ -211,6 +217,8 @@ pub fn default_admin_business_permissions() -> Permissions {
         | Permissions::VIEW_INVOICES
         | Permissions::MANAGE_INVOICES
         | Permissions::VIEW_QUOTES
+        | Permissions::VIEW_AUTOMATION
+        | Permissions::MANAGE_AUTOMATION
 }
 
 /// #304: the business bits a fresh organization's default `member` role
@@ -451,5 +459,44 @@ mod tests {
         let names: [&str; 0] = [];
 
         assert_eq!(Permissions::from_names(&names).unwrap(), Permissions::NONE);
+    }
+
+    #[test]
+    fn automation_permission_bits_have_stable_values() {
+        // Append-only contract: never change these values.
+        assert_eq!(Permissions::VIEW_AUTOMATION.bits(), 524_288);
+        assert_eq!(Permissions::MANAGE_AUTOMATION.bits(), 1_048_576);
+    }
+
+    #[test]
+    fn automation_bits_round_trip_through_their_names() {
+        let original = Permissions::VIEW_AUTOMATION | Permissions::MANAGE_AUTOMATION;
+
+        let roundtripped = Permissions::from_names(&original.granted_names()).unwrap();
+
+        assert_eq!(roundtripped, original);
+    }
+
+    #[test]
+    fn reading_automation_does_not_imply_managing_it() {
+        let reader = Permissions::VIEW_AUTOMATION;
+
+        assert!(!reader.contains(Permissions::MANAGE_AUTOMATION));
+    }
+
+    #[test]
+    fn admin_reads_and_manages_automation_by_default() {
+        let admin = default_admin_business_permissions();
+
+        assert!(admin.contains(Permissions::VIEW_AUTOMATION));
+        assert!(admin.contains(Permissions::MANAGE_AUTOMATION));
+    }
+
+    #[test]
+    fn member_gets_no_automation_bit_by_default() {
+        let member = default_member_business_permissions();
+
+        assert!(!member.contains(Permissions::VIEW_AUTOMATION));
+        assert!(!member.contains(Permissions::MANAGE_AUTOMATION));
     }
 }

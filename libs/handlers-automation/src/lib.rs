@@ -10,7 +10,7 @@
 use auth::Identity;
 use axum::{Router, middleware::from_fn_with_state};
 use handlers::{ApiError, AppState, auth::auth_middleware, rate_limit::rate_limit_middleware};
-use mestier_core::OrganizationId;
+use mestier_core::{OrganizationId, Permissions};
 
 pub mod catalogue;
 pub mod credential;
@@ -22,13 +22,8 @@ pub mod workflow;
 
 pub const TAG: &str = "automation";
 
-/// Rejects an identity that does not belong to the organization.
-///
-/// Identical in shape to every other handler crate's own copy (see
-/// `handlers-planning::require_org_membership`'s doc comment for why this is
-/// honest duplication rather than a shared module): each crate is a separate
-/// HTTP adapter, and the repository already duplicates the same query.
-pub async fn require_org_membership(
+/// Membership is the outer gate, `VIEW_AUTOMATION` the inner one.
+async fn require_view_automation(
     state: &AppState,
     identity: &Identity,
     organization_id: OrganizationId,
@@ -38,12 +33,59 @@ pub async fn require_org_membership(
         .find_user_by_sub(identity.id())
         .await?
         .ok_or(ApiError::Forbidden)?;
-    let membership = state
+
+    if state
         .usecase
         .find_membership(organization_id, user.id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::Forbidden);
+    }
+
+    let permissions = state
+        .usecase
+        .member_permissions(user.id, organization_id)
         .await?;
 
-    if membership.is_none() {
+    if !permissions.contains(Permissions::VIEW_AUTOMATION) {
+        return Err(ApiError::Forbidden);
+    }
+
+    Ok(())
+}
+
+/// Membership is the outer gate, `MANAGE_AUTOMATION` the inner one.
+///
+/// Do not move this into `default_authorizer` as an action: the use cases it
+/// would gate are called by the engine itself, which has no human caller to
+/// authorize, so a `policy::require` there refuses the engine.
+async fn require_manage_automation(
+    state: &AppState,
+    identity: &Identity,
+    organization_id: OrganizationId,
+) -> Result<(), ApiError> {
+    let user = state
+        .usecase
+        .find_user_by_sub(identity.id())
+        .await?
+        .ok_or(ApiError::Forbidden)?;
+
+    if state
+        .usecase
+        .find_membership(organization_id, user.id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::Forbidden);
+    }
+
+    let permissions = state
+        .usecase
+        .member_permissions(user.id, organization_id)
+        .await?;
+
+    if !permissions.contains(Permissions::MANAGE_AUTOMATION) {
         return Err(ApiError::Forbidden);
     }
 

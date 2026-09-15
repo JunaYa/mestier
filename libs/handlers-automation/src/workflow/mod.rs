@@ -2,14 +2,11 @@
 //! version, enable/disable and rename (`update`), delete, and read/set the
 //! event(s) that trigger it (`trigger`, #225).
 
-use auth::Identity;
 use axum::Router;
 use axum_extra::routing::RouterExt;
 use handlers::{ApiError, AppState};
 use mestier_core::{OrganizationId, Workflow};
 use uuid::Uuid;
-
-use crate::require_org_membership;
 
 pub mod create;
 pub mod delete;
@@ -31,17 +28,13 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         .typed_put(trigger::set_trigger)
 }
 
-/// Loads the workflow and checks both that the caller belongs to
-/// `organization_id` and that the workflow actually belongs to it — mirrors
-/// `credential::require_credential` and `handlers-planning::task::require_task`.
-pub(crate) async fn require_workflow(
+/// Loads a workflow of `organization_id`. Gates nothing: readers and writers
+/// share it, so the caller applies its own gate first.
+pub(crate) async fn find_workflow_in_org(
     state: &AppState,
-    identity: &Identity,
     organization_id: OrganizationId,
     workflow_id: Uuid,
 ) -> Result<Workflow, ApiError> {
-    require_org_membership(state, identity, organization_id).await?;
-
     state
         .usecase
         .find_workflow(organization_id, workflow_id)
