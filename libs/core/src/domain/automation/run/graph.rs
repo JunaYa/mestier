@@ -31,7 +31,7 @@ pub fn roots(graph: &Graph) -> Vec<&str> {
     let all_ids: HashSet<&str> = graph.connectors.iter().map(|c| c.id.as_str()).collect();
     let mut has_incoming: HashSet<&str> = HashSet::new();
     for edge in &graph.edges {
-        if all_ids.contains(edge.to.as_str()) {
+        if all_ids.contains(edge.to.as_str()) && all_ids.contains(edge.from.as_str()) {
             has_incoming.insert(edge.to.as_str());
         }
     }
@@ -148,6 +148,7 @@ mod tests {
                 connector("c2", "flow.condition"),
             ],
             edges: vec![edge("c1", "c2", Some(Branch::Then))],
+            triggers: Vec::new(),
         };
 
         assert_eq!(roots(&graph), vec!["c1"]);
@@ -161,6 +162,7 @@ mod tests {
                 connector("ca", "flow.condition"),
             ],
             edges: vec![],
+            triggers: Vec::new(),
         };
 
         assert_eq!(roots(&graph), vec!["ca", "cz"]);
@@ -175,6 +177,7 @@ mod tests {
                 edge("c1", "c3", Some(Branch::Else)),
                 edge("c1", "c4", None),
             ],
+            triggers: Vec::new(),
         };
 
         assert_eq!(branch_targets(&graph, "c1", Some(Branch::Then)), vec!["c2"]);
@@ -191,6 +194,7 @@ mod tests {
         let graph = Graph {
             connectors: vec![],
             edges: vec![edge("a", "b", None), edge("b", "c", None)],
+            triggers: Vec::new(),
         };
 
         let reached = descendants_via(&graph, &["a"]);
@@ -203,6 +207,7 @@ mod tests {
         let graph = Graph {
             connectors: vec![],
             edges: vec![edge("a", "b", None), edge("b", "a", None)],
+            triggers: Vec::new(),
         };
 
         let reached = descendants_via(&graph, &["a"]);
@@ -215,6 +220,7 @@ mod tests {
         let graph = Graph {
             connectors: vec![],
             edges: vec![],
+            triggers: Vec::new(),
         };
 
         assert_eq!(
@@ -308,11 +314,42 @@ mod tests {
         let graph = Graph {
             connectors: vec![connector("c1", "flow.condition")],
             edges: vec![],
+            triggers: Vec::new(),
         };
 
         let index = connectors_by_id(&graph);
 
         assert_eq!(index.get("c1").map(|c| c.id.as_str()), Some("c1"));
         assert_eq!(index.get("missing"), None);
+    }
+
+    #[test]
+    fn a_connector_a_trigger_points_at_is_still_a_root() {
+        use crate::domain::automation::workflow::{PlacedTrigger, TriggerKind};
+
+        let graph = Graph {
+            connectors: vec![
+                connector("c1", "http.request"),
+                connector("c2", "http.request"),
+            ],
+            edges: vec![
+                Edge {
+                    from: "t1".to_string(),
+                    to: "c1".to_string(),
+                    branch: None,
+                },
+                Edge {
+                    from: "c1".to_string(),
+                    to: "c2".to_string(),
+                    branch: None,
+                },
+            ],
+            triggers: vec![PlacedTrigger {
+                id: "t1".to_string(),
+                kind: TriggerKind::Manual,
+            }],
+        };
+
+        assert_eq!(roots(&graph), vec!["c1"]);
     }
 }
