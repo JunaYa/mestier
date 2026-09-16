@@ -5,6 +5,14 @@ import { rootConnectorIds } from '#/pages/automation/lib/graph'
 const COLUMN_WIDTH = 280
 const ROW_HEIGHT = 140
 
+export function mergedLayout(
+	graph: Schemas.GraphDto,
+	stored: Map<string, NodePosition>,
+): Map<string, NodePosition> {
+	const fallback = computeFallbackLayout(graph, new Set(stored.keys()))
+	return new Map([...fallback, ...stored])
+}
+
 export function computeFallbackLayout(
 	graph: Schemas.GraphDto,
 	covered: ReadonlySet<string>,
