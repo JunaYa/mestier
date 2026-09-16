@@ -109,7 +109,10 @@ describe('ConnectorConfigForm — rendering every kind', () => {
 		expect((screen.getByLabelText('Timeout') as HTMLInputElement).value).toBe(
 			'5',
 		)
-		expect(screen.getByLabelText('Headers')).toBeDefined()
+		expect(screen.getByText('Headers')).toBeDefined()
+		expect(
+			screen.getByRole('button', { name: /ajouter une entrée/i }),
+		).toBeDefined()
 		expect(screen.getByRole('combobox', { name: 'Méthode' })).toBeDefined()
 	})
 })
@@ -265,8 +268,11 @@ describe('ConnectorConfigForm — the typed credential slot', () => {
 			/>,
 		)
 
+		await user.click(screen.getByRole('combobox', { name: 'Identification' }))
 		await user.click(
-			screen.getByRole('button', { name: /Nouvelle identification/ }),
+			await screen.findByRole('button', {
+				name: /Créer|Nouvelle identification/,
+			}),
 		)
 
 		expect(onRequestCreateCredential).toHaveBeenCalledWith('typed')
@@ -373,7 +379,12 @@ describe('ConnectorConfigForm — the signing_credential_id field', () => {
 		)
 
 		await user.click(
-			screen.getByRole('button', { name: /Nouvelle identification/ }),
+			screen.getByRole('combobox', { name: 'Signing credential' }),
+		)
+		await user.click(
+			await screen.findByRole('button', {
+				name: /Créer|Nouvelle identification/,
+			}),
 		)
 
 		expect(onRequestCreateCredential).toHaveBeenCalledWith('signing')

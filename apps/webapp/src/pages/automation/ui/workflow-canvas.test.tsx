@@ -1117,3 +1117,76 @@ describe('WorkflowCanvas — framing the graph on load', () => {
 		})
 	})
 })
+
+describe('WorkflowCanvas — a node opens where you just made it', () => {
+	it('opens the configuration panel on the connector it just added', async () => {
+		renderHarness({
+			graph: { connectors: [], edges: [] },
+			layout: new Map(),
+			descriptors: descriptorMap(SIMPLE_DESCRIPTOR),
+		})
+
+		const triggerNode = await screen.findByTestId('rf__node-__trigger__')
+		fireEvent.click(
+			within(triggerNode).getByRole('button', {
+				name: 'Ajouter le premier connecteur',
+			}),
+		)
+		fireEvent.click(await screen.findByText('Étape simple'))
+
+		const panel = await screen.findByTestId('connector-config-panel')
+		expect(within(panel).getByText('Étape simple')).toBeDefined()
+	})
+
+	it('closes the trigger panel rather than stacking two panels', async () => {
+		renderHarness({
+			graph: { connectors: [], edges: [] },
+			layout: new Map(),
+			descriptors: descriptorMap(SIMPLE_DESCRIPTOR),
+		})
+
+		const triggerNode = await screen.findByTestId('rf__node-__trigger__')
+		fireEvent.click(within(triggerNode).getByText('Déclencheur'))
+		await screen.findByTestId('trigger-config-panel')
+
+		fireEvent.click(
+			within(triggerNode).getByRole('button', {
+				name: 'Ajouter le premier connecteur',
+			}),
+		)
+		fireEvent.click(await screen.findByText('Étape simple'))
+
+		await screen.findByTestId('connector-config-panel')
+		expect(screen.queryByTestId('trigger-config-panel')).toBeNull()
+	})
+})
+
+describe('WorkflowCanvas — the camera follows a new node', () => {
+	it('moves the viewport when a node is added off-screen', async () => {
+		renderHarness({
+			graph: { connectors: [connector('c1', SIMPLE_KIND)], edges: [] },
+			layout: new Map([['c1', { x: 0, y: 0 }]]),
+			descriptors: descriptorMap(SIMPLE_DESCRIPTOR),
+		})
+
+		const source = await screen.findByTestId('rf__node-c1')
+		const viewport = document.querySelector(
+			'.react-flow__viewport',
+		) as HTMLElement
+		const before = viewport.style.transform
+
+		fireEvent.click(
+			within(source).getByRole('button', {
+				name: 'Ajouter un connecteur après Étape simple',
+			}),
+		)
+		const options = await screen.findAllByText('Étape simple')
+		const option = options.find((element) => element.closest('button'))
+		fireEvent.click(option as HTMLElement)
+		await screen.findByTestId('rf__node-c2')
+
+		await waitFor(() => {
+			expect(viewport.style.transform).not.toBe(before)
+		})
+	})
+})
