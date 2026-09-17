@@ -70,6 +70,7 @@ import {
 	type ConnectorNodeData,
 } from '#/pages/automation/ui/connector-node'
 import { ConnectorSearch } from '#/pages/automation/ui/connector-search'
+import { DeletableEdge } from '#/pages/automation/ui/deletable-edge'
 import { TriggerConfigPanel } from '#/pages/automation/ui/trigger-config-panel'
 import {
 	TriggerNode,
@@ -90,6 +91,10 @@ const NODE_TYPES = {
 	trigger: TriggerNode,
 }
 
+const EDGE_TYPES = {
+	deletable: DeletableEdge,
+}
+
 type CreatedCredential = Schemas.CredentialResponse & { secret: unknown }
 
 export interface LastRunData {
@@ -105,6 +110,7 @@ export interface WorkflowCanvasProps {
 	events: Schemas.EventDescriptorResponse[]
 	lastRun: LastRunData | null
 	runStatuses: Map<string, string>
+	runSteps: Map<string, Schemas.RunStepResponse>
 	onEvaluateExpression: (
 		template: unknown,
 		context: Schemas.EvaluateContextBody,
@@ -174,6 +180,7 @@ function buildInitialNodes(
 function buildInitialEdges(graph: Schemas.GraphDto): Edge[] {
 	return graph.edges.map((edge) => ({
 		id: realEdgeId(edge),
+		type: 'deletable',
 		source: edge.from,
 		target: edge.to,
 		sourceHandle: edge.branch ?? undefined,
@@ -244,6 +251,7 @@ export function WorkflowCanvas({
 	events,
 	lastRun,
 	runStatuses,
+	runSteps,
 	onEvaluateExpression,
 	credentials = [],
 	authSchemes = [],
@@ -317,9 +325,19 @@ export function WorkflowCanvas({
 		[onChange, setEdges],
 	)
 
+	const handleDeleteEdge = useCallback(
+		(edgeId: string) => {
+			handleEdgesChange([{ id: edgeId, type: 'remove' }])
+		},
+		[handleEdgesChange],
+	)
+
 	const handleConnect = useCallback(
 		(connection: Connection) => {
-			const nextEdges = addEdge(connection, edgesRef.current)
+			const nextEdges = addEdge(
+				{ ...connection, type: 'deletable' },
+				edgesRef.current,
+			)
 			edgesRef.current = nextEdges
 			setEdges(nextEdges)
 			onChange(
@@ -613,8 +631,15 @@ export function WorkflowCanvas({
 			onAddNode: handleAddNode,
 			onRequestDelete: handleRequestDelete,
 			onRequestDeleteTrigger: handleDeleteTrigger,
+			onDeleteEdge: handleDeleteEdge,
 		}),
-		[catalogue, handleAddNode, handleRequestDelete, handleDeleteTrigger],
+		[
+			catalogue,
+			handleAddNode,
+			handleRequestDelete,
+			handleDeleteTrigger,
+			handleDeleteEdge,
+		],
 	)
 
 	const openNode = openConnectorId
@@ -642,7 +667,12 @@ export function WorkflowCanvas({
 			| ConnectorNodeData
 			| undefined
 		if (!data) return null
-		return descriptors.get(data.connector.kind)?.output_example ?? null
+
+		const descriptor = descriptors.get(data.connector.kind)
+		const mirrored = descriptor?.output_mirrors_field
+		if (mirrored) return data.connector.config[mirrored] ?? {}
+
+		return descriptor?.output_example ?? null
 	}
 
 	const upstreamIds = openConnectorId
@@ -657,41 +687,24 @@ export function WorkflowCanvas({
 	const triggerExample = resolveTriggerExample(events, [
 		...new Set(subscribedEventNames),
 	])
-	const exampleConnectors: AvailableConnectorData[] = upstreamIds.map((id) => ({
-		id,
-		label: connectorLabel(id),
-		output: connectorOutputExample(id),
-	}))
-	const exampleData: DataTreeSourceBundle = {
+	const availableConnectors: AvailableConnectorData[] = upstreamIds.map(
+		(id) => ({
+			id,
+			label: connectorLabel(id),
+			output: lastRun?.connectorOutputs[id] ?? connectorOutputExample(id),
+		}),
+	)
+	const availableTrigger = lastRun ? lastRun.triggerPayload : triggerExample
+	const availableData: DataTreeSourceBundle = {
 		tree: buildAvailableDataTree({
-			trigger: triggerExample,
-			connectors: exampleConnectors,
+			trigger: availableTrigger,
+			connectors: availableConnectors,
 		}),
 		context: toEvaluateContext({
-			trigger: triggerExample,
-			connectors: exampleConnectors,
+			trigger: availableTrigger,
+			connectors: availableConnectors,
 		}),
 	}
-
-	const lastRunConnectors: AvailableConnectorData[] = lastRun
-		? upstreamIds.map((id) => ({
-				id,
-				label: connectorLabel(id),
-				output: lastRun.connectorOutputs[id] ?? null,
-			}))
-		: []
-	const lastRunData: DataTreeSourceBundle | null = lastRun
-		? {
-				tree: buildAvailableDataTree({
-					trigger: lastRun.triggerPayload,
-					connectors: lastRunConnectors,
-				}),
-				context: toEvaluateContext({
-					trigger: lastRun.triggerPayload,
-					connectors: lastRunConnectors,
-				}),
-			}
-		: null
 
 	return (
 		<WorkflowCanvasActionsContext.Provider value={actions}>
@@ -711,6 +724,7 @@ export function WorkflowCanvas({
 								nodes={nodes}
 								edges={edges}
 								nodeTypes={NODE_TYPES}
+								edgeTypes={EDGE_TYPES}
 								onNodesChange={handleNodesChange}
 								onEdgesChange={handleEdgesChange}
 								onConnect={handleConnect}
@@ -791,8 +805,8 @@ export function WorkflowCanvas({
 								})
 							}
 							onCreateCredential={onCreateCredential}
-							exampleData={exampleData}
-							lastRunData={lastRunData}
+							availableData={availableData}
+							lastStep={runSteps.get(openConnectorId) ?? null}
 							onEvaluateExpression={onEvaluateExpression}
 						/>
 					) : null}

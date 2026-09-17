@@ -109,6 +109,7 @@ function Harness({
 	descriptors,
 	connectorErrors = new Map(),
 	runStatuses = new Map(),
+	runSteps = new Map(),
 	events = [],
 	lastRun = null,
 	onEvaluateExpression = () => Promise.resolve(null),
@@ -122,6 +123,7 @@ function Harness({
 	descriptors: Map<string, Schemas.ConnectorDescriptorResponse>
 	connectorErrors?: Map<string, ConnectorValidationError[]>
 	runStatuses?: Map<string, string>
+	runSteps?: Map<string, Schemas.RunStepResponse>
 	events?: Schemas.EventDescriptorResponse[]
 	lastRun?: LastRunData | null
 	onEvaluateExpression?: WorkflowCanvasProps['onEvaluateExpression']
@@ -143,6 +145,7 @@ function Harness({
 		descriptors,
 		connectorErrors,
 		runStatuses,
+		runSteps,
 		events,
 		lastRun,
 		onEvaluateExpression,
@@ -1390,13 +1393,9 @@ describe('WorkflowCanvas — the available-data tree', () => {
 		fireEvent.click(node)
 
 		await screen.findByText('Paramètres')
-		expect(
-			screen.getByRole('button', { name: /c1 · Étape à embranchements/ }),
-		).toBeDefined()
-		expect(screen.getByRole('button', { name: /c2 · En amont/ })).toBeDefined()
-		expect(
-			screen.queryByRole('button', { name: /c3 · Sur l’autre branche/ }),
-		).toBeNull()
+		expect(screen.getByText(/c1 · Étape à embranchements/)).toBeDefined()
+		expect(screen.getByText(/c2 · En amont/)).toBeDefined()
+		expect(screen.queryByText(/c3 · Sur l’autre branche/)).toBeNull()
 	})
 
 	it('fills the trigger branch from a trigger anywhere in the graph, before any run exists', async () => {
@@ -1755,5 +1754,229 @@ describe('WorkflowCanvas — a run in progress', () => {
 		expect(borderOf('c1')).not.toContain('border-amber-500')
 		expect(borderOf('c1')).not.toContain('border-emerald-500')
 		expect(borderOf('c1')).not.toContain('border-destructive')
+	})
+})
+
+describe('WorkflowCanvas — removing a connection', () => {
+	function renderTwoWiredConnectors() {
+		const graph: Schemas.GraphDto = {
+			connectors: [connector('c1', SIMPLE_KIND), connector('c2', SIMPLE_KIND)],
+			edges: [
+				{ from: 't1', to: 'c1', branch: null },
+				{ from: 'c1', to: 'c2', branch: null },
+			],
+			triggers: [trigger('t1', 'Manual')],
+		}
+
+		return renderHarness({
+			graph,
+			layout: new Map([
+				['t1', { x: -220, y: 0 }],
+				['c1', { x: 0, y: 0 }],
+				['c2', { x: 200, y: 0 }],
+			]),
+			descriptors: descriptorMap(SIMPLE_DESCRIPTOR),
+		})
+	}
+
+	it('offers no delete affordance until the connection is hovered', async () => {
+		renderTwoWiredConnectors()
+		await screen.findByTestId('rf__node-c2')
+
+		expect(
+			screen.queryByRole('button', { name: /Supprimer la liaison/ }),
+		).toBeNull()
+	})
+
+	it('still reveals it when the connection is reached by selection', async () => {
+		renderTwoWiredConnectors()
+		await screen.findByTestId('rf__node-c2')
+
+		const edge = document.querySelector(
+			'.react-flow__edge[data-testid="rf__edge-c1->c2:"]',
+		) as HTMLElement
+		fireEvent.click(edge)
+
+		expect(
+			await screen.findByRole('button', { name: /Supprimer la liaison/ }),
+		).toBeDefined()
+	})
+
+	it('reveals a delete button on the hovered connection and drops it', async () => {
+		const { onSaveSpy } = renderTwoWiredConnectors()
+		await screen.findByTestId('rf__node-c2')
+
+		const edge = document.querySelector(
+			'.react-flow__edge[data-testid="rf__edge-c1->c2:"]',
+		) as HTMLElement
+		fireEvent.mouseEnter(
+			edge.querySelector('.react-flow__edge-interaction') as Element,
+		)
+
+		const remove = await screen.findByRole('button', {
+			name: /Supprimer la liaison/,
+		})
+		fireEvent.click(remove)
+
+		fireEvent.click(screen.getByRole('button', { name: 'Enregistrer' }))
+		const [saved] = onSaveSpy.mock.calls.at(-1) as [Schemas.GraphDto]
+		expect(saved.edges).toEqual([{ from: 't1', to: 'c1', branch: null }])
+	})
+})
+
+const MIRRORING_KIND = 'test.mirroring'
+
+const MIRRORING_WITH_FIELD: Schemas.ConnectorDescriptorResponse = {
+	auth: 'None',
+	branches: [],
+	family: 'test',
+	fields: [
+		{
+			expression: true,
+			kind: 'Json',
+			label: 'Variables',
+			name: 'variables',
+			required: true,
+			secret: false,
+			visible_when: null,
+		},
+	],
+	kind: MIRRORING_KIND,
+	label: 'Configuration',
+	output_example: { generic_example: 'never shown' },
+	output_mirrors_field: 'variables',
+	version: 1,
+}
+
+const MIRRORING_DESCRIPTOR: Schemas.ConnectorDescriptorResponse = {
+	auth: 'None',
+	branches: [],
+	family: 'test',
+	fields: [],
+	kind: MIRRORING_KIND,
+	label: 'Configuration',
+	output_example: { generic_example: 'never shown' },
+	output_mirrors_field: 'variables',
+	version: 1,
+}
+
+describe('WorkflowCanvas — a connector whose output mirrors its own config', () => {
+	it('offers the variables actually configured, not the generic example', async () => {
+		const graph: Schemas.GraphDto = {
+			connectors: [
+				{
+					id: 'c1',
+					kind: MIRRORING_KIND,
+					version: 1,
+					config: { variables: { base_url: 'https://api.example.com' } },
+				},
+				connector('c2', SIMPLE_KIND),
+			],
+			edges: [
+				{ from: 't1', to: 'c1', branch: null },
+				{ from: 'c1', to: 'c2', branch: null },
+			],
+			triggers: [trigger('t1', 'Manual')],
+		}
+
+		renderHarness({
+			graph,
+			layout: new Map([
+				['t1', { x: -220, y: 0 }],
+				['c1', { x: 0, y: 0 }],
+				['c2', { x: 200, y: 0 }],
+			]),
+			descriptors: descriptorMap(MIRRORING_DESCRIPTOR, SIMPLE_DESCRIPTOR),
+		})
+
+		fireEvent.click(await screen.findByTestId('rf__node-c2'))
+		await screen.findByText('Paramètres')
+		fireEvent.click(screen.getByRole('button', { name: /c1/ }))
+
+		expect(screen.getByText('base_url')).toBeDefined()
+		expect(screen.queryByText('generic_example')).toBeNull()
+	})
+})
+
+describe('WorkflowCanvas — variables typed into a mirroring connector', () => {
+	it('reach the downstream node through the real editing path', async () => {
+		const user = userEvent.setup()
+		const graph: Schemas.GraphDto = {
+			connectors: [
+				{ id: 'c1', kind: MIRRORING_KIND, version: 1, config: {} },
+				connector('c2', SIMPLE_KIND),
+			],
+			edges: [
+				{ from: 't1', to: 'c1', branch: null },
+				{ from: 'c1', to: 'c2', branch: null },
+			],
+			triggers: [trigger('t1', 'Manual')],
+		}
+
+		renderHarness({
+			graph,
+			layout: new Map([
+				['t1', { x: -220, y: 0 }],
+				['c1', { x: 0, y: 0 }],
+				['c2', { x: 200, y: 0 }],
+			]),
+			descriptors: descriptorMap(MIRRORING_WITH_FIELD, SIMPLE_DESCRIPTOR),
+		})
+
+		fireEvent.click(await screen.findByTestId('rf__node-c1'))
+		await screen.findByText('Paramètres')
+		await user.click(screen.getByRole('button', { name: /Ajouter une entrée/ }))
+
+		const keyInput = screen.getByDisplayValue('key') as HTMLInputElement
+		await user.clear(keyInput)
+		await user.type(keyInput, 'firstname')
+		const valueInput = keyInput
+			.closest('div')
+			?.parentElement?.querySelectorAll('input')[1] as HTMLInputElement
+		await user.type(valueInput, 'John')
+
+		fireEvent.click(screen.getByTestId('rf__node-c2'))
+		await screen.findByText('Paramètres')
+		fireEvent.click(await screen.findByRole('button', { name: /c1 · / }))
+
+		expect(screen.getByText('firstname')).toBeDefined()
+	})
+})
+
+describe('WorkflowCanvas — a past run that never reached a connector', () => {
+	it('still offers that connector its own data instead of nothing', async () => {
+		const graph: Schemas.GraphDto = {
+			connectors: [
+				{
+					id: 'c1',
+					kind: MIRRORING_KIND,
+					version: 1,
+					config: { variables: { firstname: 'John' } },
+				},
+				connector('c2', SIMPLE_KIND),
+			],
+			edges: [
+				{ from: 't1', to: 'c1', branch: null },
+				{ from: 'c1', to: 'c2', branch: null },
+			],
+			triggers: [trigger('t1', 'Manual')],
+		}
+
+		renderHarness({
+			graph,
+			layout: new Map([
+				['t1', { x: -220, y: 0 }],
+				['c1', { x: 0, y: 0 }],
+				['c2', { x: 200, y: 0 }],
+			]),
+			descriptors: descriptorMap(MIRRORING_WITH_FIELD, SIMPLE_DESCRIPTOR),
+			lastRun: { triggerPayload: null, connectorOutputs: {} },
+		})
+
+		fireEvent.click(await screen.findByTestId('rf__node-c2'))
+		await screen.findByText('Paramètres')
+		fireEvent.click(await screen.findByRole('button', { name: /c1 · / }))
+
+		expect(screen.getByText('firstname')).toBeDefined()
 	})
 })

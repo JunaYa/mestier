@@ -99,11 +99,11 @@ function baseProps(
 		onConfigChange: vi.fn(),
 		onCredentialChange: vi.fn(),
 		onCreateCredential: vi.fn(),
-		exampleData: {
+		availableData: {
 			tree: [],
 			context: { trigger: null, connectors: {}, loop: null },
 		},
-		lastRunData: null,
+		lastStep: null,
 		onEvaluateExpression: vi.fn().mockResolvedValue(null),
 		...overrides,
 	}
@@ -118,7 +118,7 @@ describe('ConnectorConfigPanel — layout', () => {
 		expect(screen.getByText('Requête HTTP')).toBeDefined()
 		expect(screen.getByText('Données disponibles')).toBeDefined()
 		expect(screen.getByText('Paramètres')).toBeDefined()
-		expect(screen.getByText('Dernière sortie')).toBeDefined()
+		expect(screen.getByText('Dernière exécution')).toBeDefined()
 
 		await user.click(screen.getByRole('button', { name: /Fermer/ }))
 		expect(onClose).toHaveBeenCalledTimes(1)
@@ -413,28 +413,12 @@ const TRIGGER_BRANCH = {
 	],
 }
 
-const LAST_RUN_TRIGGER_BRANCH = {
-	kind: 'branch' as const,
-	key: 'trigger',
-	label: 'trigger',
-	path: 'trigger',
-	children: [
-		{
-			kind: 'leaf' as const,
-			key: 'confirmed_name',
-			label: 'confirmed_name',
-			path: 'trigger.confirmed_name',
-			value: 'Real customer',
-		},
-	],
-}
-
 describe('ConnectorConfigPanel — the available-data tree', () => {
 	it('shows the tree open by default, fed from the given branches', () => {
 		render(
 			<ConnectorConfigPanel
 				{...baseProps({
-					exampleData: {
+					availableData: {
 						tree: [TRIGGER_BRANCH],
 						context: { trigger: { name: 'Julie' }, connectors: {}, loop: null },
 					},
@@ -443,52 +427,6 @@ describe('ConnectorConfigPanel — the available-data tree', () => {
 		)
 
 		expect(screen.getByRole('button', { name: /trigger/ })).toBeDefined()
-	})
-
-	it('shows the real values rather than the example once a run exists', async () => {
-		const user = userEvent.setup()
-		render(
-			<ConnectorConfigPanel
-				{...baseProps({
-					exampleData: {
-						tree: [TRIGGER_BRANCH],
-						context: { trigger: { name: 'Julie' }, connectors: {}, loop: null },
-					},
-					lastRunData: {
-						tree: [LAST_RUN_TRIGGER_BRANCH],
-						context: {
-							trigger: { name: 'Real customer' },
-							connectors: {},
-							loop: null,
-						},
-					},
-				})}
-			/>,
-		)
-
-		await user.click(screen.getByRole('button', { name: 'trigger' }))
-
-		expect(screen.getByText('confirmed_name')).toBeDefined()
-		expect(screen.queryByText('name')).toBeNull()
-	})
-
-	it('falls back to the example while no run has happened', async () => {
-		const user = userEvent.setup()
-		render(
-			<ConnectorConfigPanel
-				{...baseProps({
-					exampleData: {
-						tree: [TRIGGER_BRANCH],
-						context: { trigger: { name: 'Julie' }, connectors: {}, loop: null },
-					},
-					lastRunData: null,
-				})}
-			/>,
-		)
-
-		await user.click(screen.getByRole('button', { name: 'trigger' }))
-
-		expect(screen.getByText('name')).toBeDefined()
 	})
 })
 
@@ -508,7 +446,7 @@ describe('ConnectorConfigPanel — inserting an expression', () => {
 					}),
 					config: { url: 'Hello ' },
 					onConfigChange,
-					exampleData: {
+					availableData: {
 						tree: [TRIGGER_BRANCH],
 						context: { trigger: { name: 'Julie' }, connectors: {}, loop: null },
 					},
@@ -650,5 +588,54 @@ describe('ConnectorConfigPanel — switching connectors', () => {
 		)
 
 		expect(screen.queryByText(/Aperçu/)).toBeNull()
+	})
+})
+
+describe('ConnectorConfigPanel — what the last run did to this connector', () => {
+	function step(
+		overrides: Partial<Schemas.RunStepResponse>,
+	): Schemas.RunStepResponse {
+		return {
+			attempts: 1,
+			connector_id: 'c1',
+			created_at: '2026-09-17T10:00:00Z',
+			id: 'step-1',
+			iteration_path: '',
+			status: 'succeeded',
+			...overrides,
+		}
+	}
+
+	it('says so when the connector has never run', () => {
+		render(<ConnectorConfigPanel {...baseProps({ lastStep: null })} />)
+
+		expect(screen.getByText('Aucune exécution.')).toBeDefined()
+	})
+
+	it('shows the error when the step failed, instead of claiming nothing ran', () => {
+		render(
+			<ConnectorConfigPanel
+				{...baseProps({
+					lastStep: step({ status: 'failed', error: 'connection refused' }),
+				})}
+			/>,
+		)
+
+		expect(screen.getByRole('alert').textContent).toContain(
+			'connection refused',
+		)
+		expect(screen.queryByText('Aucune exécution.')).toBeNull()
+	})
+
+	it('shows the output when the step succeeded', () => {
+		render(
+			<ConnectorConfigPanel
+				{...baseProps({
+					lastStep: step({ status: 'succeeded', output: { id: 42 } }),
+				})}
+			/>,
+		)
+
+		expect(screen.getByText(/"id": 42/)).toBeDefined()
 	})
 })
