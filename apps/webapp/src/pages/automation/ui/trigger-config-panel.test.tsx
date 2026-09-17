@@ -23,17 +23,22 @@ const EVENTS = [
 	event('invoice.paid', 'Facture payée'),
 ]
 
+function trigger(
+	kind: Schemas.TriggerKindDto,
+	id = 't1',
+): Schemas.PlacedTriggerDto {
+	return { id, kind }
+}
+
 function baseProps(
 	overrides: Partial<Parameters<typeof TriggerConfigPanel>[0]> = {},
 ) {
 	return {
+		trigger: trigger({ Events: [] }),
 		events: EVENTS,
-		mode: 'events' as const,
-		selectedEventNames: [],
-		isSaving: false,
-		saveError: null,
+		errors: [],
 		onClose: vi.fn(),
-		onSave: vi.fn(),
+		onChange: vi.fn(),
 		...overrides,
 	}
 }
@@ -52,10 +57,10 @@ describe('TriggerConfigPanel — listing', () => {
 		).toBeDefined()
 	})
 
-	it('pre-checks the currently selected events', () => {
+	it('pre-checks the events the trigger currently subscribes to', () => {
 		render(
 			<TriggerConfigPanel
-				{...baseProps({ selectedEventNames: ['quote.accepted'] })}
+				{...baseProps({ trigger: trigger({ Events: ['quote.accepted'] }) })}
 			/>,
 		)
 
@@ -71,6 +76,16 @@ describe('TriggerConfigPanel — listing', () => {
 		).toBe('false')
 	})
 
+	it('names the trigger kind in the header', () => {
+		render(
+			<TriggerConfigPanel
+				{...baseProps({ trigger: trigger({ Events: [] }, 't7') })}
+			/>,
+		)
+
+		expect(screen.getByText('Déclencheur sur événement(s)')).toBeDefined()
+	})
+
 	it('closes on request', async () => {
 		const user = userEvent.setup()
 		const onClose = vi.fn()
@@ -83,113 +98,106 @@ describe('TriggerConfigPanel — listing', () => {
 })
 
 describe('TriggerConfigPanel — the no-event warning', () => {
-	it('warns as soon as the pending selection is empty', () => {
-		render(<TriggerConfigPanel {...baseProps({ selectedEventNames: [] })} />)
-
-		expect(screen.getByText(/ne se déclenchera jamais/)).toBeDefined()
-	})
-
-	it('clears the warning once at least one event is checked', async () => {
-		const user = userEvent.setup()
-		render(<TriggerConfigPanel {...baseProps({ selectedEventNames: [] })} />)
-
-		await user.click(screen.getByRole('checkbox', { name: 'Devis accepté' }))
-
-		expect(screen.queryByText(/ne se déclenchera jamais/)).toBeNull()
-	})
-})
-
-describe('TriggerConfigPanel — the mode choice', () => {
-	it('offers both modes explicitly', () => {
-		render(<TriggerConfigPanel {...baseProps()} />)
-
-		expect(screen.getByRole('tab', { name: 'Sur événement(s)' })).toBeDefined()
-		expect(screen.getByRole('tab', { name: 'Manuel' })).toBeDefined()
-	})
-
-	it('switching to manual hides the event list and the no-event warning', async () => {
-		const user = userEvent.setup()
-		render(<TriggerConfigPanel {...baseProps({ selectedEventNames: [] })} />)
-		expect(screen.getByText(/ne se déclenchera jamais/)).toBeDefined()
-
-		await user.click(screen.getByRole('tab', { name: 'Manuel' }))
-
-		expect(screen.queryByRole('checkbox', { name: 'Devis accepté' })).toBeNull()
-		expect(screen.queryByText(/ne se déclenchera jamais/)).toBeNull()
-	})
-
-	it('starts on the workflow current mode', () => {
-		render(<TriggerConfigPanel {...baseProps({ mode: 'manual' })} />)
-
-		expect(screen.queryByRole('checkbox', { name: 'Devis accepté' })).toBeNull()
-	})
-
-	it('saves manual mode, discarding whatever was pending in the event list', async () => {
-		const user = userEvent.setup()
-		const onSave = vi.fn()
+	it('warns as soon as the trigger has no event selected', () => {
 		render(
 			<TriggerConfigPanel
-				{...baseProps({ selectedEventNames: ['quote.accepted'], onSave })}
+				{...baseProps({ trigger: trigger({ Events: [] }) })}
 			/>,
 		)
 
-		await user.click(screen.getByRole('tab', { name: 'Manuel' }))
-		await user.click(screen.getByRole('button', { name: 'Enregistrer' }))
+		expect(screen.getByText(/ne partira jamais/)).toBeDefined()
+	})
 
-		expect(onSave).toHaveBeenCalledWith('manual', [])
+	it('disappears once the trigger prop carries at least one event', () => {
+		const { rerender } = render(
+			<TriggerConfigPanel
+				{...baseProps({ trigger: trigger({ Events: [] }) })}
+			/>,
+		)
+		expect(screen.getByText(/ne partira jamais/)).toBeDefined()
+
+		rerender(
+			<TriggerConfigPanel
+				{...baseProps({ trigger: trigger({ Events: ['quote.accepted'] }) })}
+			/>,
+		)
+
+		expect(screen.queryByText(/ne partira jamais/)).toBeNull()
+	})
+
+	it('never shows for a manual trigger, even though it carries no event', () => {
+		render(
+			<TriggerConfigPanel {...baseProps({ trigger: trigger('Manual') })} />,
+		)
+
+		expect(screen.queryByText(/ne partira jamais/)).toBeNull()
 	})
 })
 
-describe('TriggerConfigPanel — saving', () => {
-	it('saves the full pending selection, additively checked, as one replacement', async () => {
+describe('TriggerConfigPanel — editing the event selection', () => {
+	it('reports the full selection, additively checked, as one replacement', async () => {
 		const user = userEvent.setup()
-		const onSave = vi.fn()
+		const onChange = vi.fn()
 		render(
 			<TriggerConfigPanel
-				{...baseProps({ selectedEventNames: ['quote.accepted'], onSave })}
+				{...baseProps({
+					trigger: trigger({ Events: ['quote.accepted'] }),
+					onChange,
+				})}
 			/>,
 		)
 
 		await user.click(screen.getByRole('checkbox', { name: 'Facture payée' }))
-		await user.click(screen.getByRole('button', { name: 'Enregistrer' }))
 
-		expect(onSave).toHaveBeenCalledWith('events', [
-			'quote.accepted',
-			'invoice.paid',
-		])
+		expect(onChange).toHaveBeenCalledWith({
+			Events: ['quote.accepted', 'invoice.paid'],
+		})
 	})
 
-	it('saves an empty array when every event is unchecked, clearing the trigger', async () => {
+	it('reports an empty array once the only selected event is unchecked', async () => {
 		const user = userEvent.setup()
-		const onSave = vi.fn()
+		const onChange = vi.fn()
 		render(
 			<TriggerConfigPanel
-				{...baseProps({ selectedEventNames: ['quote.accepted'], onSave })}
+				{...baseProps({
+					trigger: trigger({ Events: ['quote.accepted'] }),
+					onChange,
+				})}
 			/>,
 		)
 
 		await user.click(screen.getByRole('checkbox', { name: 'Devis accepté' }))
-		await user.click(screen.getByRole('button', { name: 'Enregistrer' }))
 
-		expect(onSave).toHaveBeenCalledWith('events', [])
+		expect(onChange).toHaveBeenCalledWith({ Events: [] })
 	})
+})
 
-	it('disables the save button while a save is in flight', () => {
-		render(<TriggerConfigPanel {...baseProps({ isSaving: true })} />)
-
-		const button = screen.getByRole('button', {
-			name: /Enregistrement/,
-		}) as HTMLButtonElement
-		expect(button.disabled).toBe(true)
-	})
-
-	it('banners a save error', () => {
+describe('TriggerConfigPanel — validation errors', () => {
+	it('banners every error message passed in', () => {
 		render(
 			<TriggerConfigPanel
-				{...baseProps({ saveError: 'La sauvegarde a échoué' })}
+				{...baseProps({
+					trigger: trigger({ Events: ['quote.accepted'] }),
+					errors: [
+						{ field: null, message: 'Ce déclencheur ne mène nulle part.' },
+					],
+				})}
 			/>,
 		)
 
-		expect(screen.getByText('La sauvegarde a échoué')).toBeDefined()
+		expect(screen.getByText('Ce déclencheur ne mène nulle part.')).toBeDefined()
+	})
+
+	it('shows no error banner when there are none', () => {
+		render(
+			<TriggerConfigPanel
+				{...baseProps({
+					trigger: trigger({ Events: ['quote.accepted'] }),
+					errors: [],
+				})}
+			/>,
+		)
+
+		expect(screen.queryByRole('alert')).toBeNull()
 	})
 })
