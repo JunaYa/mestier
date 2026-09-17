@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use mestier_core::{
     AuthRequirement, AuthScheme, AutomationSettings, Credential, CredentialOrigin, Field,
     FieldKind, NodePosition, OrganizationId, Run, RunStatus, RunStep, SelectOption, StepStatus,
-    VisibleWhen, Workflow, WorkflowTrigger, WorkflowTriggerMode, WorkflowVersion,
+    VisibleWhen, Workflow, WorkflowVersion,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value;
@@ -278,22 +278,6 @@ pub fn secret_value(origin: CredentialOrigin, plaintext: &[u8]) -> Value {
 
 // --- workflows -------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkflowTriggerModeDto {
-    Events,
-    Manual,
-}
-
-impl From<WorkflowTriggerMode> for WorkflowTriggerModeDto {
-    fn from(value: WorkflowTriggerMode) -> Self {
-        match value {
-            WorkflowTriggerMode::Events => Self::Events,
-            WorkflowTriggerMode::Manual => Self::Manual,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct WorkflowResponse {
     pub id: Uuid,
@@ -302,7 +286,6 @@ pub struct WorkflowResponse {
     pub description: Option<String>,
     pub enabled: bool,
     pub current_version_id: Option<Uuid>,
-    pub trigger_mode: WorkflowTriggerModeDto,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -316,33 +299,8 @@ impl From<Workflow> for WorkflowResponse {
             description: value.description,
             enabled: value.enabled,
             current_version_id: value.current_version_id,
-            trigger_mode: value.trigger_mode.into(),
             created_at: value.created_at,
             updated_at: value.updated_at,
-        }
-    }
-}
-
-/// The event(s) a workflow currently triggers from (#225) — `event_names`
-/// empty means no subscription, not an error: a freshly created workflow, or
-/// one whose trigger was just cleared, both read back this way.
-#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
-pub struct WorkflowTriggerResponse {
-    pub mode: WorkflowTriggerModeDto,
-    pub event_names: Vec<String>,
-}
-
-impl From<WorkflowTrigger> for WorkflowTriggerResponse {
-    fn from(value: WorkflowTrigger) -> Self {
-        match value {
-            WorkflowTrigger::Events(event_names) => Self {
-                mode: WorkflowTriggerModeDto::Events,
-                event_names,
-            },
-            WorkflowTrigger::Manual => Self {
-                mode: WorkflowTriggerModeDto::Manual,
-                event_names: Vec::new(),
-            },
         }
     }
 }
@@ -439,6 +397,54 @@ impl From<EdgeDto> for mestier_core::Edge {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub enum TriggerKindDto {
+    Manual,
+    Events(Vec<String>),
+}
+
+impl From<mestier_core::TriggerKind> for TriggerKindDto {
+    fn from(value: mestier_core::TriggerKind) -> Self {
+        match value {
+            mestier_core::TriggerKind::Manual => Self::Manual,
+            mestier_core::TriggerKind::Events(names) => Self::Events(names),
+        }
+    }
+}
+
+impl From<TriggerKindDto> for mestier_core::TriggerKind {
+    fn from(value: TriggerKindDto) -> Self {
+        match value {
+            TriggerKindDto::Manual => Self::Manual,
+            TriggerKindDto::Events(names) => Self::Events(names),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PlacedTriggerDto {
+    pub id: String,
+    pub kind: TriggerKindDto,
+}
+
+impl From<mestier_core::PlacedTrigger> for PlacedTriggerDto {
+    fn from(value: mestier_core::PlacedTrigger) -> Self {
+        Self {
+            id: value.id,
+            kind: value.kind.into(),
+        }
+    }
+}
+
+impl From<PlacedTriggerDto> for mestier_core::PlacedTrigger {
+    fn from(value: PlacedTriggerDto) -> Self {
+        Self {
+            id: value.id,
+            kind: value.kind.into(),
+        }
+    }
+}
+
 /// The workflow graph on the wire — the editor reads and writes this whole,
 /// both as the body of `PUT .../versions` and nested in a workflow's
 /// current version on `GET .../workflows/{id}`.
@@ -446,6 +452,7 @@ impl From<EdgeDto> for mestier_core::Edge {
 pub struct GraphDto {
     pub connectors: Vec<PlacedConnectorDto>,
     pub edges: Vec<EdgeDto>,
+    pub triggers: Vec<PlacedTriggerDto>,
 }
 
 impl From<mestier_core::Graph> for GraphDto {
@@ -453,6 +460,7 @@ impl From<mestier_core::Graph> for GraphDto {
         Self {
             connectors: value.connectors.into_iter().map(Into::into).collect(),
             edges: value.edges.into_iter().map(Into::into).collect(),
+            triggers: value.triggers.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -462,7 +470,7 @@ impl From<GraphDto> for mestier_core::Graph {
         Self {
             connectors: value.connectors.into_iter().map(Into::into).collect(),
             edges: value.edges.into_iter().map(Into::into).collect(),
-            triggers: Vec::new(),
+            triggers: value.triggers.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -814,6 +822,65 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_graph_crossing_the_wire_keeps_its_triggers() {
+        let domain = mestier_core::Graph {
+            connectors: vec![mestier_core::PlacedConnector {
+                id: "c1".to_string(),
+                kind: "flow.condition".to_string(),
+                version: 1,
+                credential_id: None,
+                config: serde_json::Map::new(),
+            }],
+            edges: vec![mestier_core::Edge {
+                from: "t1".to_string(),
+                to: "c1".to_string(),
+                branch: None,
+            }],
+            triggers: vec![mestier_core::PlacedTrigger {
+                id: "t1".to_string(),
+                kind: mestier_core::TriggerKind::Manual,
+            }],
+        };
+
+        let round_tripped: mestier_core::Graph = GraphDto::from(domain.clone()).into();
+
+        assert_eq!(round_tripped, domain);
+    }
+
+    #[test]
+    fn a_graph_the_editor_sends_is_still_saveable() {
+        let sent = serde_json::from_value::<GraphDto>(json!({
+            "connectors": [{
+                "id": "c1",
+                "kind": "flow.condition",
+                "version": 1,
+                "credential_id": null,
+                "config": { "predicate": "{{ true }}" }
+            }],
+            "edges": [{ "from": "t1", "to": "c1", "branch": null }],
+            "triggers": [{ "id": "t1", "kind": "Manual" }]
+        }))
+        .expect("the editor's graph deserializes");
+
+        let graph: mestier_core::Graph = sent.into();
+
+        assert_eq!(
+            mestier_core::validate_graph(&graph, &connector_catalogue(), &[], &event_catalogue()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_graph_omitting_its_triggers_is_refused_on_the_wire() {
+        let parsed = serde_json::from_value::<GraphDto>(json!({
+            "connectors": [],
+            "edges": []
+        }));
+
+        assert!(parsed.is_err());
+    }
 
     // --- secret_value --------------------------------------------------
 
